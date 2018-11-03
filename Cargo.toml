@@ -6,7 +6,6 @@ edition = "2015"
 
 [dependencies]
 chrono = "0.4"
-color_quant = "1"
 gif = "0.10"
 image = "0.20"
 rayon = "1"

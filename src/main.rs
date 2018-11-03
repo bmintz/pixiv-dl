@@ -1,4 +1,3 @@
-extern crate color_quant;
 extern crate gif;
 extern crate image;
 extern crate rayon;
@@ -98,13 +97,6 @@ impl<'a> Iterator for IllustIterator<'a> {
 impl Downloader {
     fn new(delay: u16) -> Self {
         let mut headers = HeaderMap::new();
-        headers.insert("App-OS", HeaderValue::from_static("ios"));
-        headers.insert("App-OS-Version", HeaderValue::from_static("10.3.1"));
-        headers.insert("App-Version", HeaderValue::from_static("6.7.1"));
-        headers.insert(
-            header::USER_AGENT,
-            HeaderValue::from_static("PixivIOSApp/6.7.1 (ios 10.3.1; iPhone8,1)"),
-        );
         headers.insert(
             header::ACCEPT_ENCODING,
             HeaderValue::from_static("gzip, deflate, sdch"),
@@ -116,7 +108,7 @@ impl Downloader {
         }
     }
 
-    fn login(&mut self, username: &str, password: &str) -> ::reqwest::Result<()> {
+    fn login(&mut self, username: &str, password: &str) -> ::reqwest::Result<bool> {
         let mut form = HashMap::new();
         form.insert("get_secure_url", "1");
         form.insert("client_id", "MOBrBDS8blbauoSck0ZfDbtuzpyT");
@@ -130,13 +122,19 @@ impl Downloader {
             .headers(self.headers.clone())
             .form(&form)
             .send()?;
-        let outer: LoginOuterResponse = resp.json()?;
+        let outer: LoginOuterResponse = match resp.json() {
+            Ok(r) => r,
+            Err(_) => {
+                println!("{:#?}", resp.json::<serde_json::Value>());
+                return Ok(false);
+            }
+        };
         self.headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", outer.response.access_token.as_str()))
                 .unwrap(),
         );
-        Ok(())
+        Ok(true)
     }
 
     fn get(
@@ -215,33 +213,44 @@ impl Downloader {
                 }
 
                 username = temp;
-
-                for path in fs::read_dir(pwd).unwrap() {
-                    let dirname: String = path.unwrap().path().to_string_lossy().into();
-                    if dirname.contains(user_id) {
-                        if !dirname.contains(&username) {
-                            let (idx, _) = dirname
-                                .chars()
-                                .enumerate()
-                                .filter(|(_, ch)| !['+', '=', '-', '_'].contains(ch))
-                                .next()
-                                .unwrap();
-                            let new_dirname =
-                                format!("{}{}][{}", &dirname[..idx], username, &dirname[idx..]);
-                            match fs::rename(&dirname, &new_dirname) {
-                                Ok(()) => user_folder = new_dirname,
-                                Err(_) => {
+                match fs::read_dir(pwd) {
+                    Ok(dir) => {
+                        for path in dir {
+                            let dirname: String = path.unwrap().path().to_string_lossy().into();
+                            if dirname.contains(user_id) {
+                                if !dirname.contains(&username) {
+                                    let (idx, _) = dirname
+                                        .chars()
+                                        .enumerate()
+                                        .filter(|(_, ch)| !['+', '=', '-', '_'].contains(ch))
+                                        .next()
+                                        .unwrap();
+                                    let new_dirname = format!(
+                                        "{}{}][{}",
+                                        &dirname[..idx],
+                                        username,
+                                        &dirname[idx..]
+                                    );
+                                    match fs::rename(&dirname, &new_dirname) {
+                                        Ok(()) => user_folder = new_dirname,
+                                        Err(_) => {
+                                            user_folder = dirname;
+                                            log(&format!(
+                                                "Failed to add name {} to {}.",
+                                                &username, &user_folder
+                                            ));
+                                        }
+                                    }
+                                } else {
                                     user_folder = dirname;
-                                    log(&format!(
-                                        "Failed to add name {} to {}.",
-                                        &username, &user_folder
-                                    ));
                                 }
+                                break;
                             }
-                        } else {
-                            user_folder = dirname;
                         }
-                        break;
+                    }
+                    Err(e) => {
+                        log("Failed to read directory!");
+                        println!("{:#?}", e);
                     }
                 }
                 if user_folder.is_empty() {
@@ -432,10 +441,14 @@ fn main() -> io::Result<()> {
             file.read_to_string(&mut input)?;
             let value: toml::Value = input.parse().unwrap();
             input.clear();
-            (
-                value["username"].as_str().unwrap().into(),
-                value["password"].as_str().unwrap().into(),
-            )
+            let (username, password) = (value["username"].as_str(), value["password"].as_str());
+            match (username, password) {
+                (Some(u), Some(p)) => (u.into(), p.into()),
+                _ => {
+                    log("Bad TOML file. Correct or delete it.");
+                    return Ok(());
+                }
+            }
         }
         Err(e) => match e.kind() {
             NotFound => {
@@ -450,8 +463,9 @@ fn main() -> io::Result<()> {
                     Ok(mut file) => {
                         write!(
                             file,
-                            r#"username = "{}"\npassword = "{}"\n"#,
-                            &username, &password
+                            "username = \"{}\"\npassword = \"{}\"\n",
+                            &username.trim(),
+                            &password.trim()
                         )?;
                     }
                     Err(e) => log(&format!("Failed to save to file\n{:#?}", e)),
@@ -472,7 +486,15 @@ fn main() -> io::Result<()> {
     };
 
     let mut dl = Downloader::new(delay);
-    dl.login(&username, &password).unwrap();
+    match dl.login(&username, &password) {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(e) => {
+            println!("{:#?}", e);
+            return Ok(());
+        }
+    };
+
     loop {
         input!("What would you like to do?\n1: Check for updates\n2: Download a new artist\n3: Exit\n> ")?;
         input.clear();
@@ -493,9 +515,18 @@ fn main() -> io::Result<()> {
                 let mut uids: Vec<String> = Vec::new();
                 let re = Regex::new(r"\((\d+)\)[-+=_]{0,2}$").unwrap();
                 let pwd = Path::new(".");
-                for path in fs::read_dir(pwd).unwrap() {
-                    if let Some(m) = re.captures(path?.path().to_string_lossy().as_ref()) {
-                        uids.push(m.get(1).unwrap().as_str().into());
+                match fs::read_dir(pwd) {
+                    Ok(dir) => {
+                        for path in dir {
+                            if let Some(m) = re.captures(path?.path().to_string_lossy().as_ref()) {
+                                uids.push(m.get(1).unwrap().as_str().into());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log("Could not read directory!");
+                        println!("{:#?}", e);
+                        return Ok(());
                     }
                 }
                 uids.into_par_iter()
@@ -522,7 +553,7 @@ fn main() -> io::Result<()> {
                     .for_each(|uid| dl.download_user(uid, &on_dup));
             }
             Ok(3) => {
-                log("Goodbye!");
+                println!("Goodbye!");
                 break;
             }
             _ => {}
