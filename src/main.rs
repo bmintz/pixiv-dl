@@ -1,3 +1,4 @@
+extern crate failure;
 extern crate gif;
 extern crate image;
 extern crate rayon;
@@ -83,12 +84,16 @@ impl<'a> Iterator for IllustIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.illusts.is_empty() {
-            let mut resp = self
+            match self
                 .downloader
                 .user_illusts(&self.user_id, self.offset, &self.typ)
-                .unwrap();
-            self.illusts.append(resp["illusts"].as_array_mut().unwrap());
-            self.offset += 30;
+            {
+                Ok(mut resp) => {
+                    self.illusts.append(resp["illusts"].as_array_mut().unwrap());
+                    self.offset += 30;
+                }
+                Err(e) => println!("{:#?}", e),
+            }
         }
         self.illusts.pop()
     }
@@ -185,8 +190,8 @@ impl Downloader {
         self.get(suffix, &params)?.json()
     }
 
-    fn download_user(&self, user_id: &str, on_dup: &OnDuplicate) {
-        let detail = self.user_detail(user_id).unwrap();
+    fn download_user(&self, user_id: &str, on_dup: &OnDuplicate) -> Result<(), failure::Error> {
+        let detail = self.user_detail(user_id)?;
         let mut user_folder = String::new();
         let username: String;
         match detail.get("user") {
@@ -216,30 +221,35 @@ impl Downloader {
                 match fs::read_dir(pwd) {
                     Ok(dir) => {
                         for path in dir {
-                            let dirname: String = path.unwrap().path().to_string_lossy().into();
+                            let dirname: String = path?.path().to_string_lossy().into();
                             if dirname.contains(user_id) {
                                 if !dirname.contains(&username) {
-                                    let (idx, _) = dirname
+                                    match dirname
                                         .chars()
                                         .enumerate()
                                         .filter(|(_, ch)| !['+', '=', '-', '_'].contains(ch))
+                                        .map(|(idx, _)| idx)
                                         .next()
-                                        .unwrap();
-                                    let new_dirname = format!(
-                                        "{}{}][{}",
-                                        &dirname[..idx],
-                                        username,
-                                        &dirname[idx..]
-                                    );
-                                    match fs::rename(&dirname, &new_dirname) {
-                                        Ok(()) => user_folder = new_dirname,
-                                        Err(_) => {
-                                            user_folder = dirname;
-                                            log(&format!(
-                                                "Failed to add name {} to {}.",
-                                                &username, &user_folder
-                                            ));
+                                    {
+                                        Some(idx) => {
+                                            let new_dirname = format!(
+                                                "{}{}][{}",
+                                                &dirname[..idx],
+                                                username,
+                                                &dirname[idx..]
+                                            );
+                                            match fs::rename(&dirname, &new_dirname) {
+                                                Ok(()) => user_folder = new_dirname,
+                                                Err(_) => {
+                                                    user_folder = dirname;
+                                                    log(&format!(
+                                                        "Failed to add name {} to {}.",
+                                                        &username, &user_folder
+                                                    ));
+                                                }
+                                            }
                                         }
+                                        None => {}
                                     }
                                 } else {
                                     user_folder = dirname;
@@ -255,7 +265,7 @@ impl Downloader {
                 }
                 if user_folder.is_empty() {
                     user_folder = format!("__{}({})__", username, user_id);
-                    fs::create_dir(&user_folder).unwrap();
+                    fs::create_dir(&user_folder)?;
                 }
                 let illust_iterator = IllustIterator::new(self, user_id.into(), "illust")
                     .chain(IllustIterator::new(self, user_id.into(), "manga"));
@@ -263,33 +273,35 @@ impl Downloader {
                     let illust_id = &illust["id"].as_u64().unwrap().to_string();
                     if illust["type"] == "ugoira" {
                         match self.download_ugoira(&illust_id, &user_folder, on_dup) {
-                            Ok(true) => {
-                                log(&format!("Downloaded {} (gif)", illust_id));
+                            Ok(Some(path)) => {
+                                log(&format!("Downloaded {}", path));
                                 thread::sleep(self.delay);
                             }
-                            Ok(false) => {}
-                            Err(()) => return,
+                            Ok(None) => match on_dup {
+                                OnDuplicate::Quit => return Ok(()),
+                                OnDuplicate::Skip => {}
+                                OnDuplicate::Save => unreachable!(),
+                            },
+                            Err(e) => println!("{:#?}", e),
                         }
                     } else {
                         let pages = illust["meta_pages"].as_array().unwrap();
                         if !pages.is_empty() {
-                            for (idx, page) in pages.iter().enumerate() {
-                                let img_url = page["image_urls"]["original"].as_str().unwrap();
+                            for page in pages.iter() {
+                                let img_url = &page["image_urls"]["original"].as_str().unwrap();
                                 let referer = format!("https://www.pixiv.net/member_illust.php?mode=manga&illust_id={}", illust_id);
                                 match self.download_image(&img_url, &user_folder, &referer, on_dup)
                                 {
-                                    Ok(true) => {
-                                        log(&format!(
-                                            "Downloaded {}{}{} page {}",
-                                            user_folder,
-                                            std::path::MAIN_SEPARATOR,
-                                            illust_id,
-                                            idx + 1
-                                        ));
+                                    Ok(Some(path)) => {
+                                        log(&format!("Downloaded {}", path));
                                         thread::sleep(self.delay)
                                     }
-                                    Ok(false) => break,
-                                    Err(()) => return,
+                                    Ok(None) => match on_dup {
+                                        OnDuplicate::Quit => return Ok(()),
+                                        OnDuplicate::Skip => break,
+                                        OnDuplicate::Save => unreachable!(),
+                                    },
+                                    Err(e) => println!("{:#?}", e),
                                 }
                             }
                         } else {
@@ -301,17 +313,16 @@ impl Downloader {
                                 illust_id
                             );
                             match self.download_image(&img_url, &user_folder, &referer, &on_dup) {
-                                Ok(true) => {
-                                    log(&format!(
-                                        "Downloaded {}{}{}",
-                                        user_folder,
-                                        std::path::MAIN_SEPARATOR,
-                                        illust_id
-                                    ));
+                                Ok(Some(path)) => {
+                                    log(&format!("Downloaded {}", path));
                                     thread::sleep(self.delay);
                                 }
-                                Ok(false) => {}
-                                Err(()) => return,
+                                Ok(None) => match on_dup {
+                                    OnDuplicate::Quit => return Ok(()),
+                                    OnDuplicate::Skip => {}
+                                    OnDuplicate::Save => unreachable!(),
+                                },
+                                Err(e) => println!("{:#?}", e),
                             }
                         }
                     }
@@ -321,6 +332,7 @@ impl Downloader {
                 log(&format!("User with id {} is invalid", user_id));
             }
         }
+        Ok(())
     }
 
     fn download_image(
@@ -329,19 +341,18 @@ impl Downloader {
         path: &str,
         referer: &str,
         on_dup: &OnDuplicate,
-    ) -> Result<bool, ()> {
-        let img_path = &format!("{}{}", path, &url[url.rfind('/').unwrap()..]);
-        if Path::new(img_path).exists() {
+    ) -> Result<Option<String>, failure::Error> {
+        let img_path = format!("{}{}", path, &url[url.rfind('/').unwrap()..]);
+        if Path::new(&img_path).exists() {
             match on_dup {
-                OnDuplicate::Skip => return Ok(false),
-                OnDuplicate::Quit => return Err(()),
                 OnDuplicate::Save => {}
+                _ => return Ok(None),
             }
         }
-        let mut resp = self.get_with_referer(url, referer).unwrap();
-        let mut img_file = fs::File::create(img_path).unwrap();
-        resp.copy_to(&mut img_file).unwrap();
-        Ok(true)
+        let mut resp = self.get_with_referer(url, referer)?;
+        let mut img_file = fs::File::create(&img_path)?;
+        resp.copy_to(&mut img_file)?;
+        Ok(Some(img_path))
     }
 
     fn download_ugoira(
@@ -349,14 +360,13 @@ impl Downloader {
         illust_id: &str,
         path: &str,
         on_dup: &OnDuplicate,
-    ) -> Result<bool, ()> {
-        let img_path = &format!("{}{}{}.gif", path, std::path::MAIN_SEPARATOR, illust_id);
+    ) -> Result<Option<String>, failure::Error> {
+        let img_path = format!("{}{}{}.gif", path, std::path::MAIN_SEPARATOR, illust_id);
 
-        if Path::new(img_path).exists() {
+        if Path::new(&img_path).exists() {
             match on_dup {
-                OnDuplicate::Skip => return Ok(false),
-                OnDuplicate::Quit => return Err(()),
                 OnDuplicate::Save => {}
+                _ => return Ok(None),
             }
         }
 
@@ -365,7 +375,7 @@ impl Downloader {
             illust_id
         );
 
-        let metadata = &self.ugoira_metadata(illust_id).unwrap()["ugoira_metadata"];
+        let metadata = &self.ugoira_metadata(illust_id)?["ugoira_metadata"];
 
         let zip_url = &metadata["zip_urls"]["medium"].as_str().unwrap();
         let full_zip_url = &format!(
@@ -374,12 +384,12 @@ impl Downloader {
             illust_id
         );
 
-        let mut resp = self.get_with_referer(full_zip_url, illust_url).unwrap();
+        let mut resp = self.get_with_referer(full_zip_url, illust_url)?;
         let mut buf = Vec::new();
-        resp.read_to_end(&mut buf).unwrap();
+        resp.read_to_end(&mut buf)?;
 
         let reader = io::Cursor::new(buf.as_slice());
-        let mut archive = zip::ZipArchive::new(reader).unwrap();
+        let mut archive = zip::ZipArchive::new(reader)?;
 
         let first_frame = image::load_from_memory(
             archive
@@ -389,15 +399,15 @@ impl Downloader {
                 .filter_map(|b| b.ok())
                 .collect::<Vec<_>>()
                 .as_slice(),
-        ).unwrap();
+        )?;
 
         let dimensions = first_frame.dimensions();
         let width = dimensions.0 as u16;
         let height = dimensions.1 as u16;
 
-        let mut img_file = fs::File::create(img_path).unwrap();
-        let mut encoder = gif::Encoder::new(&mut img_file, width, height, &[]).unwrap();
-        encoder.set(gif::Repeat::Infinite).unwrap();
+        let mut img_file = fs::File::create(&img_path)?;
+        let mut encoder = gif::Encoder::new(&mut img_file, width, height, &[])?;
+        encoder.set(gif::Repeat::Infinite)?;
 
         let images: Vec<Vec<u8>> = (0..archive.len())
             .map(|idx| {
@@ -420,10 +430,10 @@ impl Downloader {
                 frame
             }).collect();
 
-        frames
-            .iter()
-            .for_each(|frame| encoder.write_frame(frame).unwrap());
-        Ok(true)
+        for frame in frames.iter() {
+            encoder.write_frame(frame)?;
+        }
+        Ok(Some(img_path))
     }
 }
 
@@ -431,7 +441,7 @@ fn log(message: &str) {
     println!("{} {}", chrono::Local::now().format("%H:%M:%S"), message);
 }
 
-fn main() -> io::Result<()> {
+fn main() -> Result<(), failure::Error> {
     let mut input = String::new();
     let stdin = io::stdin();
     let mut handle = stdin.lock();
@@ -439,7 +449,7 @@ fn main() -> io::Result<()> {
     let (username, password): (String, String) = match fs::File::open("pixiv.toml") {
         Ok(mut file) => {
             file.read_to_string(&mut input)?;
-            let value: toml::Value = input.parse().unwrap();
+            let value: toml::Value = input.parse()?;
             input.clear();
             let (username, password) = (value["username"].as_str(), value["password"].as_str());
             match (username, password) {
@@ -530,7 +540,10 @@ fn main() -> io::Result<()> {
                     }
                 }
                 uids.into_par_iter()
-                    .for_each(|uid| dl.download_user(&uid, &on_dup));
+                    .for_each(|uid| match dl.download_user(&uid, &on_dup) {
+                        Ok(()) => {}
+                        Err(e) => println!("{:#?}", e),
+                    });
             }
             Ok(2) => {
                 let on_dup = loop {
@@ -547,10 +560,12 @@ fn main() -> io::Result<()> {
                 input!("Enter user IDs separated by spaces: ")?;
                 input.clear();
                 handle.read_line(&mut input)?;
-                input
-                    .trim()
-                    .par_split_whitespace()
-                    .for_each(|uid| dl.download_user(uid, &on_dup));
+                input.trim().par_split_whitespace().for_each(|uid| {
+                    match dl.download_user(uid, &on_dup) {
+                        Ok(()) => {}
+                        Err(e) => println!("{:#?}", e),
+                    }
+                });
             }
             Ok(3) => {
                 println!("Goodbye!");
