@@ -1,6 +1,8 @@
 extern crate failure;
 extern crate gif;
 extern crate image;
+#[macro_use]
+extern crate lazy_static;
 extern crate rayon;
 extern crate regex;
 extern crate reqwest;
@@ -32,6 +34,22 @@ macro_rules! input {
         print!($x);
         ::std::io::stdout().flush()
     }};
+}
+
+lazy_static! {
+    static ref CHARSET: HashSet<char> = {
+        let mut charset = HashSet::new();
+        charset.insert('<');
+        charset.insert('>');
+        charset.insert(':');
+        charset.insert('"');
+        charset.insert('/');
+        charset.insert('\\');
+        charset.insert('|');
+        charset.insert('?');
+        charset.insert('*');
+        charset
+    };
 }
 
 static URL_BASE: &str = "https://app-api.pixiv.net/v1/";
@@ -199,20 +217,9 @@ impl Downloader {
                 let pwd = Path::new(".");
                 let raw_name = user["name"].as_str().unwrap();
 
-                let mut charset = HashSet::new();
-                charset.insert('<');
-                charset.insert('>');
-                charset.insert(':');
-                charset.insert('"');
-                charset.insert('/');
-                charset.insert('\\');
-                charset.insert('|');
-                charset.insert('?');
-                charset.insert('*');
-
                 let mut temp = String::with_capacity(raw_name.len());
                 for ch in raw_name.chars() {
-                    if !charset.contains(&ch) {
+                    if !CHARSET.contains(&ch) {
                         temp.push(ch)
                     }
                 }
