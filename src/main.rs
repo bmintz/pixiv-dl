@@ -17,7 +17,7 @@ use std::{
     fs,
     io::{self, BufRead, ErrorKind::NotFound, Read, Write},
     path::Path,
-    thread,
+    thread, time,
 };
 
 use gif::SetParameter;
@@ -58,7 +58,7 @@ static AUTH_URL: &str = "https://oauth.secure.pixiv.net/auth/token";
 struct Downloader {
     client: Client,
     headers: HeaderMap,
-    delay: std::time::Duration,
+    delay: time::Duration,
 }
 
 struct IllustIterator<'a> {
@@ -106,10 +106,13 @@ impl<'a> Iterator for IllustIterator<'a> {
                 .downloader
                 .user_illusts(&self.user_id, self.offset, &self.typ)
             {
-                Ok(mut resp) => {
-                    self.illusts.append(resp["illusts"].as_array_mut().unwrap());
-                    self.offset += 30;
-                }
+                Ok(mut resp) => match resp["illusts"].as_array_mut() {
+                    Some(illusts) => {
+                        self.illusts.append(illusts);
+                        self.offset += 30;
+                    }
+                    None => {}
+                },
                 Err(e) => println!("{:#?}", e),
             }
         }
@@ -127,7 +130,7 @@ impl Downloader {
         Self {
             client: Client::new(),
             headers: headers,
-            delay: std::time::Duration::from_secs(delay.into()),
+            delay: time::Duration::from_secs(delay.into()),
         }
     }
 
@@ -148,14 +151,14 @@ impl Downloader {
         let outer: LoginOuterResponse = match resp.json() {
             Ok(r) => r,
             Err(_) => {
+                log("Failed to log in!");
                 println!("{:#?}", resp.json::<serde_json::Value>());
                 return Ok(false);
             }
         };
         self.headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", outer.response.access_token.as_str()))
-                .unwrap(),
+            HeaderValue::from_str(&format!("Bearer {}", outer.response.access_token)).unwrap(),
         );
         Ok(true)
     }
@@ -214,7 +217,6 @@ impl Downloader {
         let username: String;
         match detail.get("user") {
             Some(user) => {
-                let pwd = Path::new(".");
                 let raw_name = user["name"].as_str().unwrap();
 
                 let mut temp = String::with_capacity(raw_name.len());
@@ -225,7 +227,8 @@ impl Downloader {
                 }
 
                 username = temp;
-                match fs::read_dir(pwd) {
+
+                match fs::read_dir(Path::new(".")) {
                     Ok(dir) => {
                         for path in dir {
                             let dirname: String = path?.path().to_string_lossy().into();
@@ -249,7 +252,7 @@ impl Downloader {
                                                 Ok(()) => user_folder = new_dirname,
                                                 Err(_) => {
                                                     user_folder = dirname;
-                                                    log(&format!(
+                                                    log(format!(
                                                         "Failed to add name {} to {}.",
                                                         &username, &user_folder
                                                     ));
@@ -279,9 +282,9 @@ impl Downloader {
                 for illust in illust_iterator {
                     let illust_id = &illust["id"].as_u64().unwrap().to_string();
                     if illust["type"] == "ugoira" {
-                        match self.download_ugoira(&illust_id, &user_folder, on_dup) {
+                        match self.download_ugoira(illust_id, &user_folder, on_dup) {
                             Ok(Some(path)) => {
-                                log(&format!("Downloaded {}", path));
+                                log(format!("Downloaded {}", path));
                                 thread::sleep(self.delay);
                             }
                             Ok(None) => match on_dup {
@@ -289,7 +292,10 @@ impl Downloader {
                                 OnDuplicate::Skip => {}
                                 OnDuplicate::Save => unreachable!(),
                             },
-                            Err(e) => println!("{:#?}", e),
+                            Err(e) => {
+                                log(format!("Failed to download illust {}", illust_id));
+                                println!("{:#?}", e);
+                            }
                         }
                     } else {
                         let pages = illust["meta_pages"].as_array().unwrap();
@@ -297,10 +303,9 @@ impl Downloader {
                             for page in pages.iter() {
                                 let img_url = &page["image_urls"]["original"].as_str().unwrap();
                                 let referer = format!("https://www.pixiv.net/member_illust.php?mode=manga&illust_id={}", illust_id);
-                                match self.download_image(&img_url, &user_folder, &referer, on_dup)
-                                {
+                                match self.download_image(img_url, &user_folder, &referer, on_dup) {
                                     Ok(Some(path)) => {
-                                        log(&format!("Downloaded {}", path));
+                                        log(format!("Downloaded {}", path));
                                         thread::sleep(self.delay)
                                     }
                                     Ok(None) => match on_dup {
@@ -308,20 +313,23 @@ impl Downloader {
                                         OnDuplicate::Skip => break,
                                         OnDuplicate::Save => unreachable!(),
                                     },
-                                    Err(e) => println!("{:#?}", e),
+                                    Err(e) => {
+                                        log(format!("Failed to download illust {}", illust_id));
+                                        println!("{:#?}", e);
+                                    }
                                 }
                             }
                         } else {
-                            let img_url = illust["meta_single_page"]["original_image_url"]
+                            let img_url = &illust["meta_single_page"]["original_image_url"]
                                 .as_str()
                                 .unwrap();
                             let referer = format!(
                                 "https://www.pixiv.net/member_illust.php?mode=medium&illust_id={}",
                                 illust_id
                             );
-                            match self.download_image(&img_url, &user_folder, &referer, &on_dup) {
+                            match self.download_image(img_url, &user_folder, &referer, &on_dup) {
                                 Ok(Some(path)) => {
-                                    log(&format!("Downloaded {}", path));
+                                    log(format!("Downloaded {}", path));
                                     thread::sleep(self.delay);
                                 }
                                 Ok(None) => match on_dup {
@@ -329,14 +337,17 @@ impl Downloader {
                                     OnDuplicate::Skip => {}
                                     OnDuplicate::Save => unreachable!(),
                                 },
-                                Err(e) => println!("{:#?}", e),
+                                Err(e) => {
+                                    log(format!("Failed to download illust {}", illust_id));
+                                    println!("{:#?}", e);
+                                }
                             }
                         }
                     }
                 }
             }
             None => {
-                log(&format!("User with id {} is invalid", user_id));
+                log(format!("User with id {} is invalid", user_id));
             }
         }
         Ok(())
@@ -349,7 +360,7 @@ impl Downloader {
         referer: &str,
         on_dup: &OnDuplicate,
     ) -> Result<Option<String>, failure::Error> {
-        let img_path = format!("{}{}", path, &url[url.rfind('/').unwrap()..]);
+        let img_path = Path::new(path).join(&url[url.rfind('/').unwrap() + 1..]);
         if Path::new(&img_path).exists() {
             match on_dup {
                 OnDuplicate::Save => {}
@@ -359,7 +370,7 @@ impl Downloader {
         let mut resp = self.get_with_referer(url, referer)?;
         let mut img_file = fs::File::create(&img_path)?;
         resp.copy_to(&mut img_file)?;
-        Ok(Some(img_path))
+        Ok(Some(img_path.to_string_lossy().into_owned()))
     }
 
     fn download_ugoira(
@@ -368,9 +379,8 @@ impl Downloader {
         path: &str,
         on_dup: &OnDuplicate,
     ) -> Result<Option<String>, failure::Error> {
-        let img_path = format!("{}{}{}.gif", path, std::path::MAIN_SEPARATOR, illust_id);
-
-        if Path::new(&img_path).exists() {
+        let img_path = Path::new(path).join(format!("{}.gif", illust_id));
+        if img_path.exists() {
             match on_dup {
                 OnDuplicate::Save => {}
                 _ => return Ok(None),
@@ -440,11 +450,14 @@ impl Downloader {
         for frame in frames.iter() {
             encoder.write_frame(frame)?;
         }
-        Ok(Some(img_path))
+        Ok(Some(img_path.to_string_lossy().into_owned()))
     }
 }
 
-fn log(message: &str) {
+fn log<S>(message: S)
+where
+    S: std::fmt::Display,
+{
     println!("{} {}", chrono::Local::now().format("%H:%M:%S"), message);
 }
 
@@ -485,7 +498,10 @@ fn main() -> Result<(), failure::Error> {
                             &password.trim()
                         )?;
                     }
-                    Err(e) => log(&format!("Failed to save to file\n{:#?}", e)),
+                    Err(e) => {
+                        log("Failed to save to file");
+                        println!("{:#?}", e);
+                    }
                 }
                 (username, password)
             }
@@ -507,6 +523,7 @@ fn main() -> Result<(), failure::Error> {
         Ok(true) => {}
         Ok(false) => return Ok(()),
         Err(e) => {
+            log("Failed to log in!");
             println!("{:#?}", e);
             return Ok(());
         }
@@ -531,8 +548,7 @@ fn main() -> Result<(), failure::Error> {
 
                 let mut uids: Vec<String> = Vec::new();
                 let re = Regex::new(r"\((\d+)\)[-+=_]{0,2}$").unwrap();
-                let pwd = Path::new(".");
-                match fs::read_dir(pwd) {
+                match fs::read_dir(Path::new(".")) {
                     Ok(dir) => {
                         for path in dir {
                             if let Some(m) = re.captures(path?.path().to_string_lossy().as_ref()) {
@@ -549,7 +565,10 @@ fn main() -> Result<(), failure::Error> {
                 uids.into_par_iter()
                     .for_each(|uid| match dl.download_user(&uid, &on_dup) {
                         Ok(()) => {}
-                        Err(e) => println!("{:#?}", e),
+                        Err(e) => {
+                            log(format!("Failed to download user {}", uid));
+                            println!("{:#?}", e);
+                        }
                     });
             }
             Ok(2) => {
@@ -570,7 +589,10 @@ fn main() -> Result<(), failure::Error> {
                 input.trim().par_split_whitespace().for_each(|uid| {
                     match dl.download_user(uid, &on_dup) {
                         Ok(()) => {}
-                        Err(e) => println!("{:#?}", e),
+                        Err(e) => {
+                            log(format!("Failed to download user {}", uid));
+                            println!("{:#?}", e);
+                        }
                     }
                 });
             }
