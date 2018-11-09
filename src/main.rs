@@ -1,3 +1,4 @@
+extern crate color_quant;
 extern crate failure;
 extern crate gif;
 extern crate image;
@@ -422,10 +423,6 @@ impl Downloader {
         let width = dimensions.0 as u16;
         let height = dimensions.1 as u16;
 
-        let mut img_file = fs::File::create(&img_path)?;
-        let mut encoder = gif::Encoder::new(&mut img_file, width, height, &[])?;
-        encoder.set(gif::Repeat::Infinite)?;
-
         let images: Vec<Vec<u8>> = (0..archive.len())
             .map(|idx| {
                 let mut file = archive.by_index(idx).unwrap();
@@ -438,11 +435,35 @@ impl Downloader {
                     .into_raw()
             }).collect();
 
+        let nq = color_quant::NeuQuant::new(
+            30,
+            256,
+            images
+                .iter()
+                .flatten()
+                .map(|&val| val)
+                .collect::<Vec<u8>>()
+                .as_slice(),
+        );
+
+        let mut img_file = fs::File::create(&img_path)?;
+        let mut encoder = gif::Encoder::new(&mut img_file, width, height, &nq.color_map_rgb())?;
+        encoder.set(gif::Repeat::Infinite)?;
+
         let frames: Vec<gif::Frame> = images
             .into_par_iter()
             .enumerate()
-            .map(|(idx, mut image)| {
-                let mut frame = gif::Frame::from_rgba(width, height, image.as_mut_slice());
+            .map(|(idx, image)| {
+                let mut frame = gif::Frame::from_indexed_pixels(
+                    width,
+                    height,
+                    image
+                        .chunks(4)
+                        .map(|pix| nq.index_of(pix) as u8)
+                        .collect::<Vec<u8>>()
+                        .as_slice(),
+                    None,
+                );
                 frame.delay = (metadata["frames"][idx]["delay"].as_u64().unwrap() / 1000) as u16;
                 frame
             }).collect();
@@ -510,6 +531,7 @@ fn main() -> Result<(), failure::Error> {
     };
 
     let delay: u16 = loop {
+        break 0;
         input!("Enter seconds to delay between image downloads: ")?;
         handle.read_line(&mut input)?;
         match input.trim().parse() {
@@ -528,6 +550,9 @@ fn main() -> Result<(), failure::Error> {
             return Ok(());
         }
     };
+
+    dl.download_ugoira("71378152", ".", &OnDuplicate::Save)?;
+    return Ok(());
 
     loop {
         input!("What would you like to do?\n1: Check for updates\n2: Download a new artist\n3: Exit\n> ")?;
