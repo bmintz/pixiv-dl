@@ -535,7 +535,7 @@ fn main() -> Result<(), failure::Error> {
         }
     };
 
-    dl.download_ugoira("71378152", ".", &OnDuplicate::Save)?;
+    dl.download_ugoira("44298467", ".", &OnDuplicate::Save)?;
     return Ok(());
 
     loop {
