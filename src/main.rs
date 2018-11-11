@@ -2,6 +2,7 @@ extern crate failure;
 extern crate image;
 #[macro_use]
 extern crate lazy_static;
+extern crate png;
 extern crate rayon;
 extern crate regex;
 extern crate reqwest;
@@ -10,8 +11,6 @@ extern crate serde_derive;
 extern crate serde_json;
 extern crate toml;
 extern crate zip;
-
-mod png;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -22,6 +21,7 @@ use std::{
 };
 
 use image::GenericImageView;
+use png::HasParameters;
 use rayon::prelude::*;
 use regex::Regex;
 use reqwest::{
@@ -50,10 +50,6 @@ lazy_static! {
         charset.insert('*');
         charset
     };
-}
-
-lazy_static! {
-    static ref IEND: png::Chunk = png::Chunk::new(png::IEND);
 }
 
 static URL_BASE: &str = "https://app-api.pixiv.net/v1/";
@@ -412,49 +408,49 @@ impl Downloader {
         let reader = io::Cursor::new(buf.as_slice());
         let mut archive = zip::ZipArchive::new(reader)?;
 
-        let first_frame = image::load_from_memory(
-            archive
-                .by_index(0)
-                .unwrap()
-                .bytes()
-                .filter_map(|b| b.ok())
-                .collect::<Vec<_>>()
-                .as_slice(),
-        )?;
+        let mut pixels = Vec::new();
+        let first_frame;
+        {
+            let mut file = archive.by_index(0).unwrap();
+            file.read_to_end(&mut pixels).unwrap();
+
+            first_frame = image::load_from_memory(pixels.as_slice()).unwrap().to_rgb();
+        }
 
         let (width, height) = first_frame.dimensions();
 
-        /*let mut pixels = Vec::new();
         let frames: Vec<Vec<u8>> = (0..archive.len())
             .map(|idx| {
+                pixels.clear();
                 let mut file = archive.by_index(idx).unwrap();
                 file.read_to_end(&mut pixels).unwrap();
 
                 let image = image::load_from_memory(pixels.as_slice())
                     .unwrap()
-                    .to_rgba()
+                    .to_rgb()
                     .into_raw();
-                pixels.clear();
                 image
-            }).collect();*/
+            }).collect();
 
-        let mut png_image = png::Image::new(&img_path)?;
+        let img_file = fs::File::create(&img_path)?;
+        let ref mut buffer = io::BufWriter::new(img_file);
 
-        let mut ihdr = png::Chunk::new(png::IHDR);
-        ihdr.write_u32(width);
-        ihdr.write_u32(height);
-        ihdr.write(&[8, 2, 0, 0, 0]); // bit depth, truecolor, then header fields
-        png_image.write(&ihdr)?;
+        let mut encoder = png::Encoder::new_animated_with_frame_rate(
+            buffer,
+            width,
+            height,
+            frames.len() as u32,
+            metadata["frames"][0]["delay"].as_u64().unwrap() as u16,
+            1000,
+        )?;
 
-        /*        for frame in frames.iter() {
-            //            encoder.write_frame(frame)?;
-        }*/
+        encoder.set(png::ColorType::RGB).set(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
 
-        let mut idat = png::Chunk::new(png::IDAT);
-        idat.write(first_frame.to_rgb().into_raw().as_slice());
-        png_image.write(&idat)?;
+        for frame in frames.iter() {
+            writer.write_frame(frame)?;
+        }
 
-        png_image.write(&IEND)?;
         Ok(Some(img_path.to_string_lossy().into_owned()))
     }
 }
@@ -515,7 +511,6 @@ fn main() -> Result<(), failure::Error> {
     };
 
     let delay: u16 = loop {
-        break 0;
         input!("Enter seconds to delay between image downloads: ")?;
         handle.read_line(&mut input)?;
         match input.trim().parse() {
@@ -534,9 +529,6 @@ fn main() -> Result<(), failure::Error> {
             return Ok(());
         }
     };
-
-    dl.download_ugoira("44298467", ".", &OnDuplicate::Save)?;
-    return Ok(());
 
     loop {
         input!("What would you like to do?\n1: Check for updates\n2: Download a new artist\n3: Exit\n> ")?;

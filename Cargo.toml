@@ -18,3 +18,6 @@ serde_derive = "1"
 serde_json = "1"
 toml = "0.4"
 zip = "0.4"
+
+[dependencies.png]
+path = "../image-png"
