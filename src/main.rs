@@ -1,6 +1,4 @@
-extern crate color_quant;
 extern crate failure;
-extern crate gif;
 extern crate image;
 #[macro_use]
 extern crate lazy_static;
@@ -13,6 +11,8 @@ extern crate serde_json;
 extern crate toml;
 extern crate zip;
 
+mod png;
+
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -21,7 +21,6 @@ use std::{
     thread, time,
 };
 
-use gif::SetParameter;
 use image::GenericImageView;
 use rayon::prelude::*;
 use regex::Regex;
@@ -51,6 +50,10 @@ lazy_static! {
         charset.insert('*');
         charset
     };
+}
+
+lazy_static! {
+    static ref IEND: png::Chunk = png::Chunk::new(png::IEND);
 }
 
 static URL_BASE: &str = "https://app-api.pixiv.net/v1/";
@@ -380,7 +383,7 @@ impl Downloader {
         path: &str,
         on_dup: &OnDuplicate,
     ) -> Result<Option<String>, failure::Error> {
-        let img_path = Path::new(path).join(format!("{}.gif", illust_id));
+        let img_path = Path::new(path).join(format!("{}.png", illust_id));
         if img_path.exists() {
             match on_dup {
                 OnDuplicate::Save => {}
@@ -419,58 +422,39 @@ impl Downloader {
                 .as_slice(),
         )?;
 
-        let dimensions = first_frame.dimensions();
-        let width = dimensions.0 as u16;
-        let height = dimensions.1 as u16;
+        let (width, height) = first_frame.dimensions();
 
-        let images: Vec<Vec<u8>> = (0..archive.len())
+        /*let mut pixels = Vec::new();
+        let frames: Vec<Vec<u8>> = (0..archive.len())
             .map(|idx| {
                 let mut file = archive.by_index(idx).unwrap();
-                let mut pixels = Vec::new();
                 file.read_to_end(&mut pixels).unwrap();
 
-                image::load_from_memory(pixels.as_slice())
+                let image = image::load_from_memory(pixels.as_slice())
                     .unwrap()
                     .to_rgba()
-                    .into_raw()
-            }).collect();
+                    .into_raw();
+                pixels.clear();
+                image
+            }).collect();*/
 
-        let nq = color_quant::NeuQuant::new(
-            30,
-            256,
-            images
-                .iter()
-                .flatten()
-                .map(|&val| val)
-                .collect::<Vec<u8>>()
-                .as_slice(),
-        );
+        let mut png_image = png::Image::new(&img_path)?;
 
-        let mut img_file = fs::File::create(&img_path)?;
-        let mut encoder = gif::Encoder::new(&mut img_file, width, height, &nq.color_map_rgb())?;
-        encoder.set(gif::Repeat::Infinite)?;
+        let mut ihdr = png::Chunk::new(png::IHDR);
+        ihdr.write_u32(width);
+        ihdr.write_u32(height);
+        ihdr.write(&[8, 2, 0, 0, 0]); // bit depth, truecolor, then header fields
+        png_image.write(&ihdr)?;
 
-        let frames: Vec<gif::Frame> = images
-            .into_par_iter()
-            .enumerate()
-            .map(|(idx, image)| {
-                let mut frame = gif::Frame::from_indexed_pixels(
-                    width,
-                    height,
-                    image
-                        .chunks(4)
-                        .map(|pix| nq.index_of(pix) as u8)
-                        .collect::<Vec<u8>>()
-                        .as_slice(),
-                    None,
-                );
-                frame.delay = (metadata["frames"][idx]["delay"].as_u64().unwrap() / 1000) as u16;
-                frame
-            }).collect();
+        /*        for frame in frames.iter() {
+            //            encoder.write_frame(frame)?;
+        }*/
 
-        for frame in frames.iter() {
-            encoder.write_frame(frame)?;
-        }
+        let mut idat = png::Chunk::new(png::IDAT);
+        idat.write(first_frame.to_rgb().into_raw().as_slice());
+        png_image.write(&idat)?;
+
+        png_image.write(&IEND)?;
         Ok(Some(img_path.to_string_lossy().into_owned()))
     }
 }
