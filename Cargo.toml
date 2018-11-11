@@ -6,6 +6,7 @@ edition = "2015"
 
 [dependencies]
 chrono = "0.4"
+crc = "1"
 failure = "0.1"
 image = "0.20"
 lazy_static = "1"
